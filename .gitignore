@@ -1,0 +1,13 @@
+# Visual Studio
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+
+# OS metadata
+.DS_Store
+Thumbs.db
