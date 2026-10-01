@@ -93,5 +93,5 @@ BmsToUnbeatable <chart.bms> <audioFile> <songFolderName> [--out <customsongsRoot
   - `<songFolderName>`: 생성될 게임 내 커스텀 곡 폴더 이름.
 - **선택 인수:**
   - `--out`: 커스텀 곡 루트 디렉토리를 재지정합니다. (기본값: `%UserProfile%\AppData\LocalLow\D-CELL GAMES\UNBEATABLE\customsongs`)
-  - `--difficulty`: 변환 시 난이도 이름을 설정합니다. (`Beginner`, `Easy`, `Normal`, `Hard`, `Expert`)
+  - `--difficulty`: 변환 시 난이도 이름을 설정합니다. (`Beginner`, `Easy`, `Normal`, `Hard`, `UNBEATABLE`, `Star`)
   - `--creator`: 커스터마이저 이름을 설정합니다. (지정하지 않을 경우 BMS의 Artist가 적용됨)

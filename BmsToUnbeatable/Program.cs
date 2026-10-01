@@ -12,7 +12,7 @@ if (args.Length < 3)
     Console.WriteLine("  <songFolderName>  Folder name to create under the customsongs root.");
     Console.WriteLine();
     Console.WriteLine("  Default --out is %UserProfile%\\AppData\\LocalLow\\D-CELL GAMES\\UNBEATABLE\\customsongs");
-    Console.WriteLine("  Known-valid --difficulty values (seen in game strings): Beginner, Easy, Normal, Hard, Expert.");
+    Console.WriteLine("  Valid --difficulty values (BeatmapIndex.selectableDifficulties): Beginner, Easy, Normal, Hard, UNBEATABLE, Star.");
     return 1;
 }
 

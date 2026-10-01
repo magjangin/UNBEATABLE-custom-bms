@@ -10,8 +10,9 @@ using UnityEngine;
 namespace UnbeatableCustomMode;
 
 /// <summary>
-/// On startup, scans "&lt;GameRoot&gt;/hwa/&lt;songName&gt;/" folders for a BMS chart + audio file,
-/// converts each one into the game's native CustomSongs format, and drops it into
+/// On startup, scans "&lt;GameRoot&gt;/hwa/&lt;songName&gt;/" folders for BMS charts + an audio file,
+/// converts every chart in the folder (one per difficulty, chosen by the trailing number on the
+/// BMS filename) into the game's native CustomSongs format, and drops them into
 /// Application.persistentDataPath/CustomSongs so the untouched ArcadeSongDatabase pipeline picks it up
 /// (see Patches.cs for the Harmony patch that makes that pipeline run without "-customsongs").
 /// </summary>
@@ -19,6 +20,16 @@ public static class HwaSongLoader
 {
     private static readonly string[] BmsExtensions = { ".bms", ".bme", ".bml" };
     private static readonly string[] AudioExtensions = { ".ogg", ".mp3", ".wav" };
+
+    // BeatmapIndex.selectableDifficulties, in index order (read straight out of the game's
+    // Resources/BeatmapIndex asset). These are the only difficulties the song-select filter can
+    // cycle to, so a chart exported under any other name is loaded but permanently invisible.
+    // The full BeatmapIndex.difficulties list also holds Tutorial/OFFSETWIZARD/Trailer - all
+    // non-selectable, hence deliberately absent here.
+    private static readonly string[] SelectableDifficulties =
+        { "Beginner", "Easy", "Normal", "Hard", "UNBEATABLE", "Star" };
+
+    private const string FallbackDifficulty = "Normal";
 
     // channel -> (Side: 0=Right, 1=Left; Height: 0=Top, 1=Low, 2=Mid)
     private static readonly Dictionary<string, (int Side, int Height)> ChannelMap = new()
@@ -74,9 +85,11 @@ public static class HwaSongLoader
     {
         string songName = Path.GetFileName(songDir);
 
-        string bmsPath = Directory.GetFiles(songDir)
-            .FirstOrDefault(f => BmsExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
-        if (bmsPath == null)
+        var bmsPaths = Directory.GetFiles(songDir)
+            .Where(f => BmsExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (bmsPaths.Count == 0)
         {
             return;
         }
@@ -88,16 +101,6 @@ public static class HwaSongLoader
         if (audioPath == null)
         {
             logger.Warning($"'{songName}' has a chart but no audio file (.ogg/.mp3/.wav) next to it - skipped.");
-            return;
-        }
-
-        var chart = BmsParser.Parse(bmsPath);
-        var timing = new BmsTiming(chart);
-        var notes = BuildNotes(chart, timing, songName, logger);
-        var channel18Events = CollectChannel18Events(chart, timing, songName, logger);
-        if (notes.Count == 0)
-        {
-            logger.Warning($"'{songName}' converted to 0 notes (cell width detected: {chart.CellWidth}) - check that it uses channels 11/12/16 (Right) or 13/14/15 (Left) with #WAVxxx names matching a known note type.");
             return;
         }
 
@@ -123,12 +126,107 @@ public static class HwaSongLoader
             }
         }
 
-        string creator = string.IsNullOrWhiteSpace(chart.Artist) ? "hwa" : chart.Artist;
-        UnbeatableExporter.Export(chart, timing, notes, channel18Events, outDir, audioFileName, "Hard", creator);
+        // difficulty -> the BMS that claimed it, so a second chart landing on the same difficulty
+        // can be reported instead of silently losing to AddBeatmapToCustomSong's swallowed
+        // "Duplicate difficulty" throw.
+        var claimed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        int realTurns = channel18Events.Count(e => e.IsRealTurn);
-        int centerFlourishes = channel18Events.Count - realTurns;
-        logger.Msg($"Converted '{songName}' ({notes.Count} notes, {realTurns} real turns, {centerFlourishes} center-camera flourishes, {chart.MaxMeasure + 1} measures) -> {outDir}");
+        foreach (var bmsPath in bmsPaths)
+        {
+            string bmsName = Path.GetFileName(bmsPath);
+            string difficulty = ResolveDifficulty(bmsPath, songName, logger);
+            if (claimed.TryGetValue(difficulty, out var owner))
+            {
+                logger.Warning($"'{songName}': '{bmsName}' also resolves to {difficulty}, already taken by '{owner}' - skipped. Give it a different trailing number (1-{SelectableDifficulties.Length}).");
+                continue;
+            }
+
+            var chart = BmsParser.Parse(bmsPath);
+            var timing = new BmsTiming(chart);
+            var notes = BuildNotes(chart, timing, songName, logger);
+            var channel18Events = CollectChannel18Events(chart, timing, songName, logger);
+            if (notes.Count == 0)
+            {
+                logger.Warning($"'{songName}': '{bmsName}' converted to 0 notes (cell width detected: {chart.CellWidth}) - check that it uses channels 11/12/16 (Right) or 13/14/15 (Left) with #WAVxxx names matching a known note type.");
+                continue;
+            }
+
+            string creator = string.IsNullOrWhiteSpace(chart.Artist) ? "hwa" : chart.Artist;
+            UnbeatableExporter.Export(chart, timing, notes, channel18Events, outDir, audioFileName, difficulty, creator);
+            claimed[difficulty] = bmsName;
+
+            int realTurns = channel18Events.Count(e => e.IsRealTurn);
+            int centerFlourishes = channel18Events.Count - realTurns;
+            logger.Msg($"Converted '{songName}' [{difficulty}] from '{bmsName}' ({notes.Count} notes, {realTurns} real turns, {centerFlourishes} center-camera flourishes, {chart.MaxMeasure + 1} measures) -> {outDir}");
+        }
+
+        if (claimed.Count == 0)
+        {
+            logger.Warning($"'{songName}': none of the {bmsPaths.Count} BMS file(s) produced a chart - leaving any previously converted .txt in place.");
+            return;
+        }
+
+        PruneStaleCharts(outDir, songName, claimed.Keys, logger);
+    }
+
+    /// <summary>
+    /// LoadCustoms() parses every *.txt in the song folder, so a chart left behind by an earlier
+    /// run (under a difficulty that no longer has a BMS) would keep showing up as a phantom
+    /// entry. Only runs once at least one chart converted, so a bad run never wipes a good one.
+    /// </summary>
+    private static void PruneStaleCharts(string outDir, string songName, IEnumerable<string> liveDifficulties, MelonLogger.Instance logger)
+    {
+        var keep = new HashSet<string>(liveDifficulties.Select(d => d + ".txt"), StringComparer.OrdinalIgnoreCase);
+        foreach (var txtPath in Directory.GetFiles(outDir, "*.txt"))
+        {
+            string txtName = Path.GetFileName(txtPath);
+            if (keep.Contains(txtName)) continue;
+
+            File.Delete(txtPath);
+            logger.Msg($"'{songName}': removed stale '{txtName}' - no BMS in the hwa folder maps to that difficulty any more.");
+        }
+    }
+
+    /// <summary>
+    /// Picks the difficulty a BMS exports under, in order of preference:
+    ///   1. a trailing number on the filename ("hwa2.bms" -> 2 -> Easy), 1-based into
+    ///      <see cref="SelectableDifficulties"/> - i.e. "the Nth difficulty in the game";
+    ///   2. a difficulty name anywhere in the filename ("fogat Hard.bms" -> Hard);
+    ///   3. <see cref="FallbackDifficulty"/>.
+    /// The exported filename IS the difficulty as far as the game is concerned -
+    /// AddBeatmapToCustomSong() substring-matches it against BeatmapIndex.difficulties and ignores
+    /// the [Metadata] Version field entirely.
+    /// </summary>
+    private static string ResolveDifficulty(string bmsPath, string songName, MelonLogger.Instance logger)
+    {
+        string bmsName = Path.GetFileName(bmsPath);
+        string stem = Path.GetFileNameWithoutExtension(bmsPath);
+
+        int digitStart = stem.Length;
+        while (digitStart > 0 && char.IsDigit(stem[digitStart - 1]))
+        {
+            digitStart--;
+        }
+
+        if (digitStart < stem.Length && int.TryParse(stem.Substring(digitStart), out int index))
+        {
+            if (index >= 1 && index <= SelectableDifficulties.Length)
+            {
+                return SelectableDifficulties[index - 1];
+            }
+
+            logger.Warning($"'{songName}': '{bmsName}' ends in {index}, outside the 1-{SelectableDifficulties.Length} difficulty range ({string.Join(", ", SelectableDifficulties)}) - falling back to {FallbackDifficulty}.");
+            return FallbackDifficulty;
+        }
+
+        string named = SelectableDifficulties.FirstOrDefault(d => stem.IndexOf(d, StringComparison.OrdinalIgnoreCase) >= 0);
+        if (named != null)
+        {
+            return named;
+        }
+
+        logger.Warning($"'{songName}': '{bmsName}' has no trailing difficulty number and no difficulty name - defaulting to {FallbackDifficulty}. Rename it like 'hwa4.bms' (4 = Hard) to choose.");
+        return FallbackDifficulty;
     }
 
     // Channel 18 carries two distinct WAV references:
